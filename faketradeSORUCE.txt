@@ -151,35 +151,40 @@ local function hop()
             print(string.format("[HOP] Intentando server publico #%d (jugadores: %d, id: %s)",
                 intentos, server.playing, server.id))
 
-            -- Escuchar el evento de fallo para detectar GameFull de inmediato
+            -- Escuchar fallo ANTES de llamar al teleport, sin timeout fijo.
+            -- Si el teleport realmente funciona, el juego cambia de servidor y el
+            -- script muere solo; nunca llegamos al "return false".
+            -- Si falla (GameFull, Unauthorized, etc.) el evento dispara y salimos.
             local failed = false
             local conn
-            conn = TeleportService.TeleportInitFailed:Connect(function(player, result, err)
+            conn = TeleportService.TeleportInitFailed:Connect(function(player, result)
                 failed = true
                 conn:Disconnect()
-                print("[HOP] Fallo (" .. tostring(result) .. "), saltando al siguiente...")
+                warn("[HOP] Fallo (" .. tostring(result) .. "), saltando al siguiente...")
             end)
 
-            local ok, err = pcall(function()
+            local ok, callErr = pcall(function()
                 TeleportService:TeleportToPlaceInstance(placeId, server.id, LocalPlayer)
             end)
 
             if not ok then
                 conn:Disconnect()
-                warn("[HOP] Error de teleport: " .. tostring(err))
+                warn("[HOP] Error al llamar teleport: " .. tostring(callErr))
             else
-                -- Esperar confirmacion de fallo o exito (max 4s)
+                print("[HOP] Teleport enviado, esperando respuesta de Roblox...")
+                -- Esperar hasta 20s; si falla, el evento pone failed=true antes.
+                -- Si llega a 20s sin fallo = exito real, el juego ya cargo otro server.
                 local t = 0
-                while not failed and t < 4 do
+                while not failed and t < 20 do
                     task.wait(0.1)
                     t += 0.1
                 end
                 if not failed then
-                    -- Teleport exitoso, el juego cargara solo
-                    print("[HOP] Teleport exitoso, cargando...")
-                    return
+                    -- 20s sin fallo Y sin cambio de servidor = algo raro, reintentar
+                    conn:Disconnect()
+                    warn("[HOP] Sin respuesta en 20s, reintentando con siguiente server...")
                 end
-                -- Si fallo (GameFull u otro), continuar de inmediato sin esperar
+                -- failed=true: continua el for al siguiente server de inmediato
             end
         end
 
