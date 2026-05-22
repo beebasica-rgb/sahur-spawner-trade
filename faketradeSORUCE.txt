@@ -6,57 +6,7 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- ── 1. PARCHE ANTICHEAT (Synchronizer) ──────────────────────
-local function WaitFor(path, timeout)
-    timeout = timeout or 15
-    local started = os.clock()
-    local function left()
-        return math.max(0, timeout - (os.clock() - started))
-    end
-    local segments = {}
-    for seg in path:gmatch("[^%.]+") do table.insert(segments, seg) end
-    local current
-    local ok, svc = pcall(function() return game:GetService(segments[1]) end)
-    current = (ok and svc) or game:WaitForChild(segments[1], left())
-    if not current then return nil end
-    for i = 2, #segments do
-        current = current:WaitForChild(segments[i], left())
-        if not current then return nil end
-    end
-    return current
-end
-
-do
-    local syncModule = WaitFor("ReplicatedStorage.Packages.Synchronizer", 30)
-    local Sync = {}
-    if syncModule then
-        pcall(function() Sync = require(syncModule) end)
-    end
-    if type(Sync) ~= "table" then Sync = {} end
-
-    for _, fn in pairs(Sync) do
-        if typeof(fn) ~= "function" then continue end
-        if isexecutorclosure(fn) then continue end
-        local ok, ups = pcall(debug.getupvalues, fn)
-        if not ok then continue end
-        for idx, val in pairs(ups) do
-            if typeof(val) == "function" and not isexecutorclosure(val) then
-                local ok2, innerUps = pcall(debug.getupvalues, val)
-                if ok2 then
-                    for _, v in pairs(innerUps) do
-                        if typeof(v) == "boolean" then
-                            debug.setupvalue(fn, idx, newcclosure(function() end))
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-    print("[HOP] Anticheat parcheado.")
-end
-
--- ── 2. SERVICIOS Y JUGADOR ───────────────────────────────────
+-- ── 1. SERVICIOS Y JUGADOR ───────────────────────────────────
 local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
@@ -151,16 +101,24 @@ local function hop()
             print(string.format("[HOP] Intentando server publico #%d (jugadores: %d, id: %s)",
                 intentos, server.playing, server.id))
 
-            -- Escuchar fallo ANTES de llamar al teleport, sin timeout fijo.
-            -- Si el teleport realmente funciona, el juego cambia de servidor y el
-            -- script muere solo; nunca llegamos al "return false".
-            -- Si falla (GameFull, Unauthorized, etc.) el evento dispara y salimos.
-            local failed = false
+            -- BindableEvent para despertar el hilo INSTANTANEO al fallar,
+            -- sin ningun polling. Si el teleport es exitoso el juego carga
+            -- otro servidor y este script muere solo.
+            local signal    = Instance.new("BindableEvent")
+            local failResult = nil
             local conn
+
             conn = TeleportService.TeleportInitFailed:Connect(function(player, result)
-                failed = true
+                failResult = result
                 conn:Disconnect()
-                warn("[HOP] Fallo (" .. tostring(result) .. "), saltando al siguiente...")
+                signal:Fire()  -- despierta el hilo al instante
+            end)
+
+            -- Timeout de seguridad: 20s sin respuesta = exito real
+            local timeoutThread = task.delay(20, function()
+                if signal.Parent then  -- si aun no fue destruido
+                    signal:Fire()
+                end
             end)
 
             local ok, callErr = pcall(function()
@@ -168,23 +126,23 @@ local function hop()
             end)
 
             if not ok then
+                task.cancel(timeoutThread)
                 conn:Disconnect()
+                signal:Destroy()
                 warn("[HOP] Error al llamar teleport: " .. tostring(callErr))
             else
-                print("[HOP] Teleport enviado, esperando respuesta de Roblox...")
-                -- Esperar hasta 20s; si falla, el evento pone failed=true antes.
-                -- Si llega a 20s sin fallo = exito real, el juego ya cargo otro server.
-                local t = 0
-                while not failed and t < 20 do
-                    task.wait(0.1)
-                    t += 0.1
+                print("[HOP] Teleport enviado...")
+                signal.Event:Wait()  -- bloquea hasta fallo O timeout, sin polling
+                task.cancel(timeoutThread)
+                signal:Destroy()
+
+                if failResult then
+                    warn("[HOP] Fallo (" .. tostring(failResult) .. "), siguiente server...")
+                    -- failResult != nil → continua el for al siguiente server
+                else
+                    -- Sin fallo en 20s = el juego ya cambio de servidor
+                    warn("[HOP] Sin respuesta en 20s, probando siguiente...")
                 end
-                if not failed then
-                    -- 20s sin fallo Y sin cambio de servidor = algo raro, reintentar
-                    conn:Disconnect()
-                    warn("[HOP] Sin respuesta en 20s, reintentando con siguiente server...")
-                end
-                -- failed=true: continua el for al siguiente server de inmediato
             end
         end
 
